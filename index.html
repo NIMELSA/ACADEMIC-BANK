@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NIMELSA KDU Chapter — Academic Bank</title>
+<meta name="description" content="The NIMELSA KDU Chapter shared shelf — lecture notes, past questions, textbooks and study guides, all in one place.">
+<link rel="icon" type="image/png" href="logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ================= INTRO SEQUENCE ================= -->
+<div id="intro" aria-hidden="true">
+  <div class="intro-track">
+    <div class="intro-ball"></div>
+  </div>
+  <div class="intro-panel intro-panel-top"></div>
+  <div class="intro-panel intro-panel-bottom"></div>
+  <button id="introSkip" type="button">Skip intro</button>
+</div>
+
+<!-- ================= HEADER ================= -->
+<header class="site-header">
+  <div class="wrap header-row">
+    <a class="brand" href="#top" data-nav="home">
+      <span class="brand-mark" aria-hidden="true">
+        <img src="logo.png" alt="" width="34" height="34">
+      </span>
+      <span class="brand-text">NIMELSA <em>KDU Chapter</em></span>
+    </a>
+    <nav class="main-nav">
+      <button type="button" class="nav-link" data-nav="browse">Browse the shelf</button>
+      <button type="button" class="nav-link" data-nav="upload">Add a resource</button>
+    </nav>
+    <button type="button" class="btn btn-brass header-cta" data-nav="upload">Add a resource</button>
+    <button type="button" id="mobileToggle" class="mobile-toggle" aria-label="Open menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <nav class="mobile-nav" id="mobileNav">
+    <button type="button" class="nav-link" data-nav="browse">Browse the shelf</button>
+    <button type="button" class="nav-link" data-nav="upload">Add a resource</button>
+  </nav>
+</header>
+
+<main id="top">
+
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div class="wrap hero-inner">
+      <p class="hero-kicker">A chapter is only as strong as what it leaves behind</p>
+      <h1 class="hero-title">The shelf every KDU class <br class="lg-only">has been quietly building.</h1>
+      <p class="hero-sub">Lecture notes, past questions, handouts and study guides, gathered by NIMELSA members and kept in one place — so nobody has to start from a blank page the night before an exam.</p>
+
+      <form class="catalog-search" id="heroSearch" role="search">
+        <label for="heroSearchInput" class="sr-only">Search the shelf</label>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="heroSearchInput" type="text" placeholder="Search by course, topic or code — e.g. “MTH 201”">
+        <button type="submit" class="btn btn-brass">Search</button>
+      </form>
+
+      <dl class="hero-stats" id="heroStats">
+        <div><dt id="statResources">—</dt><dd>resources on the shelf</dd></div>
+        <div><dt id="statCourses">—</dt><dd>courses covered</dd></div>
+        <div><dt id="statContributors">—</dt><dd>members who've contributed</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <!-- ================= BROWSE ================= -->
+  <section class="section" id="browse" data-section="browse">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Browse the shelf</h2>
+        <p>Filter by level and material type to find what your course needs.</p>
+      </div>
+
+      <div class="filter-bar">
+        <div class="filter-group" id="levelFilters" data-filter="level">
+          <button type="button" class="pill is-active" data-value="">All levels</button>
+        </div>
+        <div class="filter-group" id="typeFilters" data-filter="type">
+          <button type="button" class="pill is-active" data-value="">All types</button>
+        </div>
+      </div>
+
+      <div id="resultsMeta" class="results-meta"></div>
+      <div id="resourceGrid" class="resource-grid" aria-live="polite"></div>
+
+      <div id="emptyState" class="empty-state" hidden>
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h10M4 18h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <h3>Nothing here yet</h3>
+        <p id="emptyStateText">No resources match those filters. Try widening your search, or be the first to add one.</p>
+        <button type="button" class="btn btn-brass" data-nav="upload">Add a resource</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= UPLOAD ================= -->
+  <section class="section section-alt" id="upload" data-section="upload">
+    <div class="wrap upload-wrap">
+      <div class="section-head">
+        <h2>Add to the shelf</h2>
+        <p>Goes live on the shelf immediately — no waiting on approval.</p>
+      </div>
+
+      <form id="uploadForm" class="upload-form">
+        <div class="form-row">
+          <label for="f_title">Title</label>
+          <input id="f_title" name="title" type="text" required minlength="2" maxlength="180" placeholder="e.g. Thermodynamics — Complete Lecture Notes">
+        </div>
+
+        <div class="form-row">
+          <label for="f_uploader_name">Your name <span class="opt">(optional — shown as who shared it)</span></label>
+          <input id="f_uploader_name" name="uploader_name" type="text" maxlength="120" placeholder="e.g. Ada, 300L">
+        </div>
+
+        <div class="form-row two-col">
+          <div>
+            <label for="f_course_name">Course name</label>
+            <input id="f_course_name" name="course_name" type="text" required placeholder="e.g. Engineering Thermodynamics">
+          </div>
+          <div>
+            <label for="f_course_code">Course code <span class="opt">(optional)</span></label>
+            <input id="f_course_code" name="course_code" type="text" placeholder="e.g. MEE 305">
+          </div>
+        </div>
+
+        <div class="form-row two-col">
+          <div>
+            <label for="f_level">Level</label>
+            <select id="f_level" name="level" required></select>
+          </div>
+          <div>
+            <label for="f_resource_type">Resource type</label>
+            <select id="f_resource_type" name="resource_type" required></select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label for="f_description">Description <span class="opt">(optional)</span></label>
+          <textarea id="f_description" name="description" rows="3" maxlength="600" placeholder="What's inside, which semester, which lecturer — anything that helps a classmate trust it's the right file."></textarea>
+        </div>
+
+        <div class="form-row">
+          <label for="f_file">File</label>
+          <div class="file-drop" id="fileDrop">
+            <input id="f_file" name="file" type="file" required accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip,.jpg,.jpeg,.png,.webp">
+            <div class="file-drop-copy">
+              <strong id="fileDropLabel">Choose a file or drag it here</strong>
+              <span>PDF, Word, PowerPoint, Excel, image or zip — up to 500&nbsp;MB</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-foot">
+          <button type="submit" class="btn btn-brass" id="uploadSubmitBtn">Upload to the shelf</button>
+          <span id="uploadStatus" class="upload-status" role="status"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+  <!-- ================= ADMIN (hidden, not linked — visit #admin) ================= -->
+  <section class="section" id="admin" data-section="admin" hidden>
+    <div class="wrap admin-wrap">
+      <div class="section-head">
+        <h2>Moderator panel</h2>
+        <p>Not linked anywhere on the public site. Sign in to remove anything that shouldn't be on the shelf.</p>
+      </div>
+
+      <div id="adminSignedOut" class="upload-form admin-login">
+        <div class="form-row">
+          <label for="adm_email">Email</label>
+          <input id="adm_email" type="email" autocomplete="email" placeholder="you@example.com">
+        </div>
+        <div class="form-row">
+          <label for="adm_password">Password</label>
+          <input id="adm_password" type="password" autocomplete="current-password" placeholder="Password">
+        </div>
+        <button type="button" class="btn btn-brass btn-block" id="adminSignInBtn">Sign in</button>
+        <p class="auth-status" id="adminAuthStatus" role="status"></p>
+      </div>
+
+      <div id="adminSignedIn" hidden>
+        <div class="admin-toolbar">
+          <span id="adminWho" class="card-meta"></span>
+          <button type="button" class="btn btn-ghost" id="adminSignOutBtn">Sign out</button>
+        </div>
+        <div id="adminList" class="admin-list"></div>
+        <p id="adminEmpty" class="results-meta" hidden>Nothing on the shelf yet.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-row">
+    <div class="brand brand-footer">
+      <span class="brand-mark" aria-hidden="true">
+        <img src="logo.png" alt="" width="26" height="26">
+      </span>
+      <span class="brand-text">NIMELSA <em>KDU Chapter</em></span>
+    </div>
+    <p>Built by members, kept for members. Report a broken or wrong file from its download menu.</p>
+  </div>
+</footer>
+
+<!-- ================= TOAST ================= -->
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
