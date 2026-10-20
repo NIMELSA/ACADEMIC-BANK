@@ -1,16 +1,16 @@
 /* =========================================================
    NIMELSA KDU Chapter — Academic Bank
    Vanilla JS, no build step. Talks directly to Supabase.
-   No accounts: anyone can browse and submit; a moderator
-   approves submissions from the Supabase dashboard.
+   No accounts: anyone can browse and submit; moderators
+   manage submissions from the #admin panel.
    ========================================================= */
 
 // ---------- CONFIG ----------
-// Public project URL + publishable key. These are safe to expose in
-// client-side code — they only allow what your Row Level Security
-// policies permit. Never put a service_role / secret key here.
-const SUPABASE_URL = "https://gawqpqunhonuxnzylzvq.supabase.co";
-const SUPABASE_KEY = "sb_publishable_FSqMDZmKxxn4oPpbMIJ2ew_NZDWuMEI";
+// Public project URL + publishable key. Safe in client-side code: they only
+// allow what your Row Level Security policies permit. Never put a
+// service_role / secret key here.
+const SUPABASE_URL = "https://ukoaeqhgfztzggqtfvtp.supabase.co";
+const SUPABASE_KEY = "sb_publishable_du_mWP5gY2H6maDdkOkHSQ_or01k3Ew";
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -21,18 +21,31 @@ const RESOURCE_TYPES = ["Lecture Notes", "Handout", "Past Questions", "Practical
 const BUCKET = "resources";
 const MAX_FILE_BYTES = 524288000; // 500 MB, matches DB check
 const UPLOAD_PREFIX = "public-submissions"; // matches the storage policy
+const PAGE_SIZE = 24;
+const CACHE_TTL_MS = 60 * 1000;
+const MODERATOR_ROLES = ["admin", "super_admin", "moderator"];
 
 // ---------- STATE ----------
-let filters = { level: "", type: "", q: "" };
+const filters = { level: "", type: "", q: "" };
 let searchDebounce = null;
+let loadSeq = 0;            // ignores stale responses when filters change quickly
+let page = 0;               // current page for "Load more"
+let totalCount = 0;
+let isLoading = false;
+const pageCache = new Map(); // cacheKey -> { at, data, count }
+
+// ---------- TINY HELPERS ----------
+const $ = (id) => document.getElementById(id);
+const on = (el, evt, fn, opts) => { if (el) el.addEventListener(evt, fn, opts); };
 
 // =========================================================
 // INTRO SEQUENCE
 // =========================================================
 (function initIntro() {
-  const intro = document.getElementById("intro");
+  const intro = $("intro");
+  if (!intro) return;
   const ball = intro.querySelector(".intro-ball");
-  const skipBtn = document.getElementById("introSkip");
+  const skipBtn = $("introSkip");
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   let finished = false;
@@ -43,7 +56,7 @@ let searchDebounce = null;
     intro.classList.add("is-done");
   }
 
-  if (reduceMotion) {
+  if (reduceMotion || !ball) {
     finish();
     return;
   }
@@ -56,18 +69,19 @@ let searchDebounce = null;
     setTimeout(finish, 950);
   }, { once: true });
 
-  skipBtn.addEventListener("click", () => {
+  on(skipBtn, "click", () => {
     intro.classList.add("is-open");
     finish();
   });
 
-  // Safety net in case the animationend event never fires
-  setTimeout(() => { if (!intro.classList.contains("is-open")) { intro.classList.add("is-open"); playZipSound(); } }, 2200);
+  // Safety nets in case animationend never fires
+  setTimeout(() => {
+    if (!intro.classList.contains("is-open")) { intro.classList.add("is-open"); playZipSound(); }
+  }, 2200);
   setTimeout(finish, 3200);
 })();
 
-// Synthesize a quick "zzzip" sound with the Web Audio API — no audio
-// file needed, so there's nothing extra to host or that can 404.
+// Synthesized "zzzip" sound — no audio file to host or 404.
 function playZipSound() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -164,7 +178,8 @@ function timeAgo(iso) {
 
 let toastTimer = null;
 function toast(message, kind) {
-  const el = document.getElementById("toast");
+  const el = $("toast");
+  if (!el) return;
   el.textContent = message;
   el.className = "toast is-visible" + (kind ? " is-" + kind : "");
   clearTimeout(toastTimer);
@@ -175,116 +190,257 @@ function sanitizeFileName(name) {
   return name.replace(/[^a-zA-Z0-9.\-_]+/g, "-").slice(-140);
 }
 
+// Strip characters that would break a PostgREST .or() filter or act as wildcards.
+function cleanSearchTerm(q) {
+  return q.replace(/[%,()*\\]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// Inject the few styles this script needs so no CSS edits are required.
+(function injectStyles() {
+  const css = `
+    .skeleton-card{border-radius:16px;padding:20px;min-height:190px;display:flex;flex-direction:column;gap:12px;
+      background:rgba(128,128,128,.10);border:1px solid rgba(128,128,128,.14)}
+    .skeleton-card i{display:block;height:12px;border-radius:6px;background:rgba(128,128,128,.22);animation:sk-pulse 1.2s ease-in-out infinite}
+    .skeleton-card i:nth-child(1){width:40%}.skeleton-card i:nth-child(2){width:85%;height:16px}
+    .skeleton-card i:nth-child(3){width:60%}.skeleton-card i:nth-child(4){width:90%;margin-top:auto}
+    @keyframes sk-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+    @media (prefers-reduced-motion: reduce){.skeleton-card i{animation:none}}
+    .load-more-wrap{display:flex;justify-content:center;padding:24px 0}
+    .load-more-wrap[hidden]{display:none}
+    .upload-progress{height:6px;border-radius:999px;background:rgba(128,128,128,.25);overflow:hidden;margin-top:10px}
+    .upload-progress>span{display:block;height:100%;width:0;background:currentColor;transition:width .15s linear}
+    .card-enter{animation:card-in .25s ease both}
+    @keyframes card-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+    @media (prefers-reduced-motion: reduce){.card-enter{animation:none}}
+  `;
+  const style = document.createElement("style");
+  style.textContent = css;
+  document.head.appendChild(style);
+})();
+
 // =========================================================
 // NAVIGATION
 // =========================================================
+const mobileNav = $("mobileNav");
+const mobileToggle = $("mobileToggle");
+
 document.querySelectorAll("[data-nav]").forEach((el) => {
-  el.addEventListener("click", () => {
+  on(el, "click", () => {
     const target = el.getAttribute("data-nav");
-    document.getElementById("mobileNav").classList.remove("is-open");
+    if (mobileNav) mobileNav.classList.remove("is-open");
     if (target === "home") { window.scrollTo({ top: 0, behavior: "smooth" }); return; }
-    const section = document.getElementById(target);
+    const section = $(target);
     if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 });
 
-document.getElementById("mobileToggle").addEventListener("click", () => {
-  document.getElementById("mobileNav").classList.toggle("is-open");
+on(mobileToggle, "click", (e) => {
+  e.stopPropagation();
+  if (mobileNav) mobileNav.classList.toggle("is-open");
+});
+// Close the mobile menu on outside tap or Escape
+on(document, "click", (e) => {
+  if (mobileNav && mobileNav.classList.contains("is-open") && !mobileNav.contains(e.target)) {
+    mobileNav.classList.remove("is-open");
+  }
+});
+on(document, "keydown", (e) => {
+  if (e.key === "Escape" && mobileNav) mobileNav.classList.remove("is-open");
 });
 
 // =========================================================
 // FILTER / SEARCH CONTROLS
 // =========================================================
 function buildFilterPills() {
-  const levelGroup = document.getElementById("levelFilters");
+  const levelGroup = $("levelFilters");
+  const typeGroup = $("typeFilters");
+  const frag1 = document.createDocumentFragment();
+  const frag2 = document.createDocumentFragment();
+
   LEVELS.forEach((lvl) => {
     const btn = document.createElement("button");
     btn.type = "button"; btn.className = "pill"; btn.dataset.value = lvl; btn.textContent = lvl;
-    levelGroup.appendChild(btn);
+    frag1.appendChild(btn);
   });
-  const typeGroup = document.getElementById("typeFilters");
   RESOURCE_TYPES.forEach((t) => {
     const btn = document.createElement("button");
     btn.type = "button"; btn.className = "pill"; btn.dataset.value = t; btn.textContent = t;
-    typeGroup.appendChild(btn);
+    frag2.appendChild(btn);
   });
+  if (levelGroup) levelGroup.appendChild(frag1);
+  if (typeGroup) typeGroup.appendChild(frag2);
 
   document.querySelectorAll(".filter-group").forEach((group) => {
-    group.addEventListener("click", (e) => {
+    on(group, "click", (e) => {
       const btn = e.target.closest(".pill");
       if (!btn) return;
+      const key = group.dataset.filter === "level" ? "level" : "type";
+      if (filters[key] === btn.dataset.value) return; // no-op: already selected
+
+      // Instant visual feedback before the network responds
       group.querySelectorAll(".pill").forEach((p) => p.classList.remove("is-active"));
       btn.classList.add("is-active");
-      const key = group.dataset.filter === "level" ? "level" : "type";
       filters[key] = btn.dataset.value;
-      loadResources();
+      loadResources({ reset: true });
     });
   });
 }
 
 function populateFormSelects() {
-  const levelSel = document.getElementById("f_level");
-  const typeSel = document.getElementById("f_resource_type");
-  levelSel.innerHTML = '<option value="" disabled selected>Choose a level</option>' + LEVELS.map((l) => `<option value="${l}">${l}</option>`).join("");
-  typeSel.innerHTML = '<option value="" disabled selected>Choose a type</option>' + RESOURCE_TYPES.map((t) => `<option value="${t}">${t}</option>`).join("");
+  const levelSel = $("f_level");
+  const typeSel = $("f_resource_type");
+  if (levelSel) levelSel.innerHTML = '<option value="" disabled selected>Choose a level</option>' + LEVELS.map((l) => `<option value="${l}">${l}</option>`).join("");
+  if (typeSel) typeSel.innerHTML = '<option value="" disabled selected>Choose a type</option>' + RESOURCE_TYPES.map((t) => `<option value="${t}">${t}</option>`).join("");
 }
 
-const heroSearch = document.getElementById("heroSearch");
-heroSearch.addEventListener("submit", (e) => {
+const heroSearch = $("heroSearch");
+const heroSearchInput = $("heroSearchInput");
+
+on(heroSearch, "submit", (e) => {
   e.preventDefault();
-  filters.q = document.getElementById("heroSearchInput").value.trim();
-  document.getElementById("browse").scrollIntoView({ behavior: "smooth" });
-  loadResources();
-});
-document.getElementById("heroSearchInput").addEventListener("input", (e) => {
   clearTimeout(searchDebounce);
-  const val = e.target.value.trim();
-  searchDebounce = setTimeout(() => { filters.q = val; loadResources(); }, 350);
+  filters.q = cleanSearchTerm(heroSearchInput.value);
+  const browse = $("browse");
+  if (browse) browse.scrollIntoView({ behavior: "smooth" });
+  loadResources({ reset: true });
+  heroSearchInput.blur(); // closes the on-screen keyboard on phones
+});
+
+on(heroSearchInput, "input", (e) => {
+  clearTimeout(searchDebounce);
+  const val = cleanSearchTerm(e.target.value);
+  searchDebounce = setTimeout(() => {
+    if (val === filters.q) return; // nothing changed, skip the request
+    filters.q = val;
+    loadResources({ reset: true });
+  }, 300);
 });
 
 // =========================================================
 // LOAD + RENDER RESOURCES
 // =========================================================
-async function loadResources() {
-  const grid = document.getElementById("resourceGrid");
-  const meta = document.getElementById("resultsMeta");
-  const empty = document.getElementById("emptyState");
-  meta.textContent = "Loading…";
+const grid = $("resourceGrid");
+const meta = $("resultsMeta");
+const emptyState = $("emptyState");
 
-  let query = sb.from("resources").select("*").eq("status", "approved").order("created_at", { ascending: false }).limit(60);
+// "Load more" button, created once and placed under the grid
+const loadMoreWrap = document.createElement("div");
+loadMoreWrap.className = "load-more-wrap";
+loadMoreWrap.hidden = true;
+const loadMoreBtn = document.createElement("button");
+loadMoreBtn.type = "button";
+loadMoreBtn.className = "btn btn-ghost";
+loadMoreBtn.textContent = "Load more";
+loadMoreWrap.appendChild(loadMoreBtn);
+if (grid && grid.parentNode) grid.parentNode.insertBefore(loadMoreWrap, grid.nextSibling);
+on(loadMoreBtn, "click", () => loadResources({ reset: false }));
+
+function showSkeletons(count = 6) {
+  if (!grid) return;
+  grid.innerHTML = Array.from({ length: count }, () =>
+    '<div class="skeleton-card" aria-hidden="true"><i></i><i></i><i></i><i></i></div>').join("");
+  grid.setAttribute("aria-busy", "true");
+}
+
+function cacheKey(pageIndex) {
+  return [filters.level, filters.type, filters.q, pageIndex].join("|");
+}
+
+async function fetchPage(pageIndex) {
+  const key = cacheKey(pageIndex);
+  const cached = pageCache.get(key);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached;
+
+  const from = pageIndex * PAGE_SIZE;
+  const to = from + PAGE_SIZE - 1;
+
+  let query = sb.from("resources")
+    .select("*", { count: "exact" })
+    .eq("status", "approved")
+    .order("created_at", { ascending: false })
+    .range(from, to);
+
   if (filters.level) query = query.eq("level", filters.level);
   if (filters.type) query = query.eq("resource_type", filters.type);
   if (filters.q) {
-    const q = filters.q.replace(/[%,]/g, "");
+    const q = filters.q;
     query = query.or(`title.ilike.%${q}%,course_name.ilike.%${q}%,course_code.ilike.%${q}%,description.ilike.%${q}%`);
   }
 
-  const { data, error } = await query;
-  if (error) {
-    meta.textContent = "";
-    toast("Couldn't load the shelf — check your connection and try again.", "error");
-    console.error(error);
-    return;
-  }
+  const { data, error, count } = await query;
+  if (error) throw error;
+  const result = { at: Date.now(), data: data || [], count: count ?? 0 };
+  pageCache.set(key, result);
+  return result;
+}
 
-  grid.innerHTML = "";
-  if (!data || data.length === 0) {
-    empty.hidden = false;
-    meta.textContent = "0 results";
-    return;
+async function loadResources({ reset = true } = {}) {
+  if (!grid) return;
+  const seq = ++loadSeq;
+  const targetPage = reset ? 0 : page + 1;
+
+  if (reset) {
+    page = 0;
+    loadMoreWrap.hidden = true;
+    if (emptyState) emptyState.hidden = true;
+    const hasCached = pageCache.has(cacheKey(0));
+    if (!hasCached) { showSkeletons(); if (meta) meta.textContent = "Loading…"; }
+  } else {
+    loadMoreBtn.disabled = true;
+    loadMoreBtn.textContent = "Loading…";
   }
-  empty.hidden = true;
-  meta.textContent = data.length + (data.length === 60 ? "+ result" : " result") + (data.length === 1 ? "" : "s");
-  data.forEach((r) => grid.appendChild(buildCard(r)));
+  isLoading = true;
+
+  try {
+    const result = await fetchPage(targetPage);
+    if (seq !== loadSeq) return; // a newer request superseded this one
+
+    totalCount = result.count;
+    page = targetPage;
+
+    if (reset) grid.innerHTML = "";
+    grid.removeAttribute("aria-busy");
+
+    if (reset && result.data.length === 0) {
+      if (emptyState) emptyState.hidden = false;
+      if (meta) meta.textContent = "0 results";
+      return;
+    }
+    if (emptyState) emptyState.hidden = true;
+
+    const frag = document.createDocumentFragment();
+    result.data.forEach((r) => frag.appendChild(buildCard(r)));
+    grid.appendChild(frag);
+
+    const shown = grid.children.length;
+    if (meta) meta.textContent = totalCount + (totalCount === 1 ? " result" : " results");
+    loadMoreWrap.hidden = shown >= totalCount;
+  } catch (error) {
+    if (seq !== loadSeq) return;
+    console.error(error);
+    grid.removeAttribute("aria-busy");
+    if (reset) grid.innerHTML = "";
+    if (meta) meta.textContent = "";
+    toast(navigator.onLine ? "Couldn't load the shelf — please try again." : "You're offline. Reconnect and try again.", "error");
+  } finally {
+    if (seq === loadSeq) {
+      isLoading = false;
+      loadMoreBtn.disabled = false;
+      loadMoreBtn.textContent = "Load more";
+    }
+  }
 }
 
 function buildCard(r) {
   const card = document.createElement("article");
-  card.className = "resource-card";
+  card.className = "resource-card card-enter";
   card.dataset.type = r.resource_type;
 
-  const { data: pub } = sb.storage.from(BUCKET).getPublicUrl(r.file_path);
-  const url = pub ? pub.publicUrl : "#";
+  const bucket = sb.storage.from(BUCKET);
+  const { data: pub } = bucket.getPublicUrl(r.file_path);
+  const { data: dl } = bucket.getPublicUrl(r.file_path, { download: r.file_name });
+  const viewUrl = pub ? pub.publicUrl : "#";
+  const downloadUrl = dl ? dl.publicUrl : viewUrl;
   const byline = r.uploader_name ? `Shared by ${escapeHtml(r.uploader_name)} · ` : "";
 
   card.innerHTML = `
@@ -296,142 +452,248 @@ function buildCard(r) {
     </div>
     <h3 class="card-title">${escapeHtml(r.title)}</h3>
     <p class="card-course">${escapeHtml(r.course_name)}${r.course_code ? " · " + escapeHtml(r.course_code) : ""}</p>
-    ${r.description ? `<p class="card-desc">${escapeHtml(r.description)}</p>` : `<p class="card-desc"></p>`}
+    <p class="card-desc">${r.description ? escapeHtml(r.description) : ""}</p>
     <div class="card-foot">
       <span class="card-meta">${byline}${formatBytes(r.file_size)} · ${timeAgo(r.created_at)}</span>
       <div class="card-actions">
-        <a class="card-view" href="${url}" target="_blank" rel="noopener">View</a>
-        <button type="button" class="card-dl" data-url="${url}" data-filename="${escapeHtml(r.file_name)}" data-id="${r.id}">
+        <a class="card-view" href="${escapeHtml(viewUrl)}" target="_blank" rel="noopener">View</a>
+        <button type="button" class="card-dl" data-url="${escapeHtml(downloadUrl)}" data-src="${escapeHtml(viewUrl)}" data-filename="${escapeHtml(r.file_name)}" data-size="${Number(r.file_size) || 0}" data-id="${escapeHtml(r.id)}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Download
         </button>
       </div>
     </div>
   `;
-  card.querySelector(".card-dl").addEventListener("click", (e) => {
-    forceDownload(e.currentTarget);
-    sb.rpc("increment_resource_download", { resource_id: r.id }).then(() => {});
-  });
   return card;
 }
 
-// Fetches the file as data and hands the browser an actual local blob to
-// save — this is what makes it a real "download" instead of just opening
-// the file in a tab (which is what a plain link does for PDFs etc).
-async function forceDownload(btn) {
-  const url = btn.dataset.url;
+// One delegated listener for every card's Download button.
+// Uses Supabase's `?download=` URL, which makes the server send the file as an
+// attachment. The browser streams it straight to disk: instant start, no RAM
+// spike, and it works for large files on phones (the old fetch-to-blob did not).
+const BLOB_DOWNLOAD_LIMIT = 150 * 1024 * 1024; // above this, stream via the server's attachment link
+
+function triggerSave(href, filename) {
+  const a = document.createElement("a");
+  a.href = href;
+  if (filename) a.download = filename;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// Downloads the file to the person's device (their Downloads / Files app).
+// Fetches the bytes, shows progress on the button, then saves a local copy
+// under the original file name. Very large files, or any failure, fall back
+// to the server's attachment link, which also saves rather than opens.
+async function downloadToDevice(btn) {
   const filename = btn.dataset.filename || "download";
+  const size = Number(btn.dataset.size) || 0;
+  const attachmentUrl = btn.dataset.url;
   const originalHTML = btn.innerHTML;
+
+  if (size > BLOB_DOWNLOAD_LIMIT) {
+    triggerSave(attachmentUrl, filename);
+    toast("Download started — check your Downloads.", "success");
+    return;
+  }
+
   btn.disabled = true;
   btn.textContent = "Downloading…";
   try {
-    const res = await fetch(url);
+    const res = await fetch(btn.dataset.src);
     if (!res.ok) throw new Error("Download failed (" + res.status + ")");
-    const blob = await res.blob();
+
+    const total = Number(res.headers.get("Content-Length")) || size;
+    let blob;
+    if (res.body && total) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        btn.textContent = "Downloading " + Math.min(100, Math.round((received / total) * 100)) + "%";
+      }
+      blob = new Blob(chunks, { type: res.headers.get("Content-Type") || "application/octet-stream" });
+    } else {
+      blob = await res.blob();
+    }
+
     const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = blobUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+    triggerSave(blobUrl, filename);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    toast("Saved to your device.", "success");
   } catch (err) {
     console.error(err);
-    // Fetch can fail on flaky mobile connections — fall back to a direct
-    // link so the person can still get the file, just not force-saved.
-    toast("Couldn't download directly — opening it instead.", "error");
-    window.open(url, "_blank", "noopener");
+    triggerSave(attachmentUrl, filename); // server-side attachment fallback
+    toast("Download started — check your Downloads.", "success");
   } finally {
     btn.disabled = false;
     btn.innerHTML = originalHTML;
   }
 }
 
+on(grid, "click", (e) => {
+  const btn = e.target.closest(".card-dl");
+  if (!btn || btn.disabled) return;
+  downloadToDevice(btn);
+  // Fire and forget — never block the download on the counter
+  sb.rpc("increment_resource_download", { resource_id: btn.dataset.id }).then(() => {}, () => {});
+});
+
 // =========================================================
 // STATS
 // =========================================================
 async function loadStats() {
-  const [{ count }, { data: rows }] = await Promise.all([
-    sb.from("resources").select("id", { count: "exact", head: true }).eq("status", "approved"),
-    sb.from("resources").select("course_name, uploader_name").eq("status", "approved"),
-  ]);
-  document.getElementById("statResources").textContent = count ?? 0;
-  if (rows) {
-    const courses = new Set(rows.map((r) => (r.course_name || "").trim().toLowerCase()).filter(Boolean));
-    const contributors = new Set(rows.map((r) => (r.uploader_name || "").trim().toLowerCase()).filter(Boolean));
-    document.getElementById("statCourses").textContent = courses.size;
-    document.getElementById("statContributors").textContent = contributors.size;
+  try {
+    const [{ count }, { data: rows }] = await Promise.all([
+      sb.from("resources").select("id", { count: "exact", head: true }).eq("status", "approved"),
+      sb.from("resources").select("course_name, uploader_name").eq("status", "approved").limit(2000),
+    ]);
+    const elR = $("statResources"), elC = $("statCourses"), elU = $("statContributors");
+    if (elR) elR.textContent = count ?? 0;
+    if (rows) {
+      const courses = new Set(rows.map((r) => (r.course_name || "").trim().toLowerCase()).filter(Boolean));
+      const contributors = new Set(rows.map((r) => (r.uploader_name || "").trim().toLowerCase()).filter(Boolean));
+      if (elC) elC.textContent = courses.size;
+      if (elU) elU.textContent = contributors.size;
+    }
+  } catch (err) {
+    console.error(err); // stats are decorative; fail quietly
   }
 }
 
 // =========================================================
 // UPLOAD (open to everyone, no account needed)
 // =========================================================
-const fileInput = document.getElementById("f_file");
-const fileDrop = document.getElementById("fileDrop");
-fileInput.addEventListener("change", () => {
-  if (fileInput.files[0]) {
-    document.getElementById("fileDropLabel").textContent = fileInput.files[0].name;
+const fileInput = $("f_file");
+const fileDrop = $("fileDrop");
+const fileDropLabel = $("fileDropLabel");
+
+function setFileLabel() {
+  if (!fileInput || !fileDropLabel || !fileDrop) return;
+  const f = fileInput.files[0];
+  if (f) {
+    fileDropLabel.textContent = `${f.name} (${formatBytes(f.size)})`;
     fileDrop.classList.add("has-file");
   } else {
-    document.getElementById("fileDropLabel").textContent = "Choose a file or drag it here";
+    fileDropLabel.textContent = "Choose a file or drag it here";
     fileDrop.classList.remove("has-file");
   }
-});
-["dragover", "dragleave", "drop"].forEach((evt) => {
-  fileDrop.addEventListener(evt, (e) => e.preventDefault());
-});
-fileDrop.addEventListener("drop", (e) => {
+}
+on(fileInput, "change", setFileLabel);
+["dragover", "dragleave", "drop"].forEach((evt) => on(fileDrop, evt, (e) => e.preventDefault()));
+on(fileDrop, "dragover", () => fileDrop.classList.add("is-dragging"));
+on(fileDrop, "dragleave", () => fileDrop.classList.remove("is-dragging"));
+on(fileDrop, "drop", (e) => {
+  fileDrop.classList.remove("is-dragging");
   if (e.dataTransfer.files[0]) {
     fileInput.files = e.dataTransfer.files;
     fileInput.dispatchEvent(new Event("change"));
   }
 });
 
-document.getElementById("uploadForm").addEventListener("submit", async (e) => {
+// Upload with real progress. supabase-js doesn't expose upload progress, so we
+// talk to the Storage REST endpoint with XHR. Falls back to the SDK on network error.
+async function uploadWithProgress(path, file, onProgress) {
+  const { data: { session } } = await sb.auth.getSession();
+  const url = `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path.split("/").map(encodeURIComponent).join("/")}`;
+
+  try {
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.setRequestHeader("apikey", SUPABASE_KEY);
+      if (session) xhr.setRequestHeader("Authorization", "Bearer " + session.access_token);
+      xhr.setRequestHeader("x-upsert", "false");
+      xhr.setRequestHeader("cache-control", "max-age=3600");
+      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) return resolve();
+        let msg = "Upload failed (" + xhr.status + ")";
+        try { msg = JSON.parse(xhr.responseText).message || msg; } catch (_) {}
+        const err = new Error(msg); err.http = true; reject(err);
+      };
+      xhr.onerror = () => reject(new Error("network"));
+      xhr.ontimeout = () => reject(new Error("network"));
+      xhr.send(file);
+    });
+  } catch (err) {
+    if (err.http) throw err;
+    // Network-level failure: retry once through the SDK
+    const { error } = await sb.storage.from(BUCKET).upload(path, file, {
+      cacheControl: "3600", upsert: false, contentType: file.type || "application/octet-stream",
+    });
+    if (error) throw error;
+    onProgress(1);
+  }
+}
+
+const uploadForm = $("uploadForm");
+on(uploadForm, "submit", async (e) => {
   e.preventDefault();
 
-  const status = document.getElementById("uploadStatus");
-  const submitBtn = document.getElementById("uploadSubmitBtn");
+  const status = $("uploadStatus");
+  const submitBtn = $("uploadSubmitBtn");
   const file = fileInput.files[0];
+  if (submitBtn.disabled) return; // guards against double-taps
 
   status.className = "upload-status";
   if (!file) { status.textContent = "Choose a file first."; status.classList.add("is-error"); return; }
   if (file.size > MAX_FILE_BYTES) { status.textContent = "That file is over the 500 MB limit."; status.classList.add("is-error"); return; }
+  if (!navigator.onLine) { status.textContent = "You're offline. Reconnect and try again."; status.classList.add("is-error"); return; }
 
+  const originalLabel = submitBtn.textContent;
   submitBtn.disabled = true;
-  status.textContent = "Uploading…";
+  status.textContent = "Uploading… 0%";
+
+  // Progress bar, created on demand
+  let bar = status.parentNode.querySelector(".upload-progress");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.className = "upload-progress";
+    bar.innerHTML = "<span></span>";
+    status.insertAdjacentElement("afterend", bar);
+  }
+  const barFill = bar.firstElementChild;
+  barFill.style.width = "0";
+  bar.hidden = false;
 
   const path = `${UPLOAD_PREFIX}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${sanitizeFileName(file.name)}`;
 
   try {
-    const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, {
-      cacheControl: "3600",
-      upsert: false,
-      contentType: file.type || "application/octet-stream",
+    await uploadWithProgress(path, file, (frac) => {
+      const pct = Math.round(frac * 100);
+      barFill.style.width = pct + "%";
+      status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Finishing up…";
+      submitBtn.textContent = pct < 100 ? `Uploading ${pct}%` : "Saving…";
     });
-    if (upErr) throw upErr;
 
     const payload = {
-      title: document.getElementById("f_title").value.trim(),
-      description: document.getElementById("f_description").value.trim() || null,
-      course_name: document.getElementById("f_course_name").value.trim(),
-      course_code: document.getElementById("f_course_code").value.trim() || null,
-      level: document.getElementById("f_level").value,
-      resource_type: document.getElementById("f_resource_type").value,
+      title: $("f_title").value.trim(),
+      description: $("f_description").value.trim() || null,
+      course_name: $("f_course_name").value.trim(),
+      course_code: $("f_course_code").value.trim() || null,
+      level: $("f_level").value,
+      resource_type: $("f_resource_type").value,
       file_name: file.name,
       file_path: path,
       file_size: file.size,
       mime_type: file.type || "application/octet-stream",
       uploaded_by: null,
-      uploader_name: document.getElementById("f_uploader_name").value.trim() || null,
+      uploader_name: $("f_uploader_name").value.trim() || null,
       status: "approved",
     };
 
     const { error: insErr } = await sb.from("resources").insert(payload);
     if (insErr) {
-      await sb.storage.from(BUCKET).remove([path]); // clean up the orphaned file
+      sb.storage.from(BUCKET).remove([path]); // clean up the orphaned file (best effort)
       throw insErr;
     }
 
@@ -439,129 +701,169 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
     status.classList.add("is-success");
     toast("Thanks — it's live on the shelf.", "success");
     e.target.reset();
-    document.getElementById("fileDropLabel").textContent = "Choose a file or drag it here";
-    fileDrop.classList.remove("has-file");
+    setFileLabel();
+
+    // Refresh the shelf + stats so the new item shows up without a reload
+    pageCache.clear();
+    loadResources({ reset: true });
+    loadStats();
   } catch (err) {
     console.error(err);
     status.textContent = err.message || "Something went wrong. Try again.";
     status.classList.add("is-error");
   } finally {
     submitBtn.disabled = false;
+    submitBtn.textContent = originalLabel;
+    setTimeout(() => { bar.hidden = true; }, 800);
   }
 });
 
 // =========================================================
 // ADMIN PANEL — not linked anywhere public. Visit yoursite/#admin
-// Sign-in only works for an account with role admin/moderator in
-// the profiles table; everyone else gets a normal permission error.
+// Sign-in only works for an account whose profiles.role is admin,
+// super_admin or moderator; everyone else just sees a permission message.
 // =========================================================
 function checkAdminRoute() {
-  const panel = document.getElementById("admin");
+  const panel = $("admin");
+  if (!panel) return;
   if (window.location.hash === "#admin") {
     panel.hidden = false;
     refreshAdminUI();
-    panel.scrollIntoView({ behavior: "instant" in window ? "instant" : "auto" });
+    panel.scrollIntoView({ behavior: "auto" });
   } else {
     panel.hidden = true;
   }
 }
-window.addEventListener("hashchange", checkAdminRoute);
+on(window, "hashchange", checkAdminRoute);
 
-document.getElementById("adminSignInBtn").addEventListener("click", async () => {
-  const email = document.getElementById("adm_email").value.trim();
-  const password = document.getElementById("adm_password").value;
-  const status = document.getElementById("adminAuthStatus");
+on($("adminSignInBtn"), "click", async () => {
+  const email = $("adm_email").value.trim();
+  const password = $("adm_password").value;
+  const status = $("adminAuthStatus");
+  const btn = $("adminSignInBtn");
   status.className = "auth-status";
   status.textContent = "";
   if (!email || !password) { status.textContent = "Enter your email and password."; status.classList.add("is-error"); return; }
+
+  btn.disabled = true;
   const { error } = await sb.auth.signInWithPassword({ email, password });
+  btn.disabled = false;
   if (error) { status.textContent = error.message; status.classList.add("is-error"); return; }
-  document.getElementById("adm_password").value = "";
+  $("adm_password").value = "";
   refreshAdminUI();
 });
 
-document.getElementById("adminSignOutBtn").addEventListener("click", async () => {
+on($("adminSignOutBtn"), "click", async () => {
   await sb.auth.signOut();
   refreshAdminUI();
 });
 
-async function refreshAdminUI() {
-  const { data: { session } } = await sb.auth.getSession();
-  const signedOutView = document.getElementById("adminSignedOut");
-  const signedInView = document.getElementById("adminSignedIn");
+let adminFilterStatus = "pending";
 
+async function refreshAdminUI() {
+  const signedOutView = $("adminSignedOut");
+  const signedInView = $("adminSignedIn");
+  if (!signedOutView || !signedInView) return;
+
+  const { data: { session } } = await sb.auth.getSession();
   if (!session) {
     signedOutView.hidden = false;
     signedInView.hidden = true;
     return;
   }
 
-  const { data: profile } = await sb.from("profiles").select("full_name, email, role").eq("id", session.user.id).maybeSingle();
-  const isMod = profile && (profile.role === "admin" || profile.role === "moderator");
+  const { data: profile } = await sb.from("profiles")
+    .select("full_name, email, role")
+    .eq("id", session.user.id)
+    .maybeSingle();
 
+  const isMod = !!profile && MODERATOR_ROLES.includes(profile.role);
   if (!isMod) {
-    // Signed in, but this account has no moderator rights — sign back out
-    // rather than leaving a confusing half-signed-in state.
     await sb.auth.signOut();
-    const status = document.getElementById("adminAuthStatus");
-    status.textContent = "That account doesn't have moderator access.";
-    status.className = "auth-status is-error";
     signedOutView.hidden = false;
     signedInView.hidden = true;
+    const status = $("adminAuthStatus");
+    if (status) {
+      status.className = "auth-status is-error";
+      status.textContent = "This account doesn't have moderator access.";
+    }
     return;
   }
 
   signedOutView.hidden = true;
   signedInView.hidden = false;
-  document.getElementById("adminWho").textContent = "Signed in as " + ((profile && profile.full_name) || session.user.email);
-  loadPendingResources();
+  const who = $("adminUserLabel") || $("adminWho");
+  if (who) who.textContent = profile.full_name || profile.email || session.user.email;
+  loadAdminList();
 }
 
-async function loadPendingResources() {
-  const list = document.getElementById("adminList");
-  const empty = document.getElementById("adminEmpty");
-  const { data, error } = await sb.from("resources").select("*").eq("status", "approved").order("created_at", { ascending: false }).limit(200);
-  if (error) { toast("Couldn't load the shelf.", "error"); console.error(error); return; }
+async function loadAdminList() {
+  const list = $("adminList");
+  if (!list) return;
+  list.innerHTML = '<p class="muted">Loading…</p>';
 
-  list.innerHTML = "";
-  if (!data || data.length === 0) { empty.hidden = false; return; }
-  empty.hidden = true;
+  let query = sb.from("resources").select("*").order("created_at", { ascending: false }).limit(100);
+  if (adminFilterStatus !== "all") query = query.eq("status", adminFilterStatus);
+  const { data, error } = await query;
 
-  data.forEach((r) => {
-    const { data: pub } = sb.storage.from(BUCKET).getPublicUrl(r.file_path);
-    const url = pub ? pub.publicUrl : "#";
-    const item = document.createElement("div");
-    item.className = "admin-item";
-    item.innerHTML = `
-      <div class="admin-item-title">${escapeHtml(r.title)}</div>
-      <div class="admin-item-meta">${escapeHtml(r.course_name)}${r.course_code ? " · " + escapeHtml(r.course_code) : ""} · ${escapeHtml(r.level)} · ${escapeHtml(r.resource_type)} · ${formatBytes(r.file_size)}${r.uploader_name ? " · from " + escapeHtml(r.uploader_name) : ""}</div>
-      ${r.description ? `<div class="admin-item-desc">${escapeHtml(r.description)}</div>` : ""}
-      <div class="admin-item-actions">
-        <a href="${url}" target="_blank" rel="noopener">Preview file →</a>
-        <button type="button" class="btn btn-reject" data-action="remove">Remove from shelf</button>
+  if (error) { list.innerHTML = ""; toast(error.message, "error"); return; }
+  if (!data.length) { list.innerHTML = '<p class="muted">Nothing here.</p>'; return; }
+
+  list.innerHTML = data.map((r) => `
+    <div class="admin-row" data-id="${escapeHtml(r.id)}" data-path="${escapeHtml(r.file_path)}">
+      <div class="admin-row-main">
+        <strong>${escapeHtml(r.title)}</strong>
+        <span class="muted">${escapeHtml(r.course_name)} · ${escapeHtml(r.level)} · ${escapeHtml(r.resource_type)} · ${escapeHtml(r.status)}</span>
       </div>
-    `;
-    item.querySelector('[data-action="remove"]').addEventListener("click", () => moderateResource(r.id, "rejected", item));
-    list.appendChild(item);
-  });
+      <div class="admin-row-actions">
+        ${r.status !== "approved" ? '<button type="button" data-act="approve" class="btn btn-small">Approve</button>' : ""}
+        ${r.status !== "rejected" ? '<button type="button" data-act="reject" class="btn btn-small btn-ghost">Reject</button>' : ""}
+        <button type="button" data-act="delete" class="btn btn-small btn-ghost">Delete</button>
+      </div>
+    </div>`).join("");
 }
 
-async function moderateResource(id, newStatus, itemEl) {
-  const { error } = await sb.from("resources").update({ status: newStatus }).eq("id", id);
-  if (error) { toast("Couldn't update that — try again.", "error"); console.error(error); return; }
-  itemEl.remove();
-  toast("Removed from the shelf.", "success");
+on($("adminList"), "click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const row = btn.closest(".admin-row");
+  const id = row.dataset.id;
+  const act = btn.dataset.act;
+
+  if (act === "delete" && !confirm("Delete this resource and its file permanently?")) return;
+  btn.disabled = true;
+
+  let error = null;
+  if (act === "approve") ({ error } = await sb.from("resources").update({ status: "approved" }).eq("id", id));
+  else if (act === "reject") ({ error } = await sb.from("resources").update({ status: "rejected" }).eq("id", id));
+  else if (act === "delete") {
+    ({ error } = await sb.from("resources").delete().eq("id", id));
+    if (!error) sb.storage.from(BUCKET).remove([row.dataset.path]);
+  }
+
+  if (error) { btn.disabled = false; toast(error.message, "error"); return; }
+
+  row.remove(); // instant UI update; no full reload needed
+  toast("Done.", "success");
+  pageCache.clear();
+  loadResources({ reset: true });
   loadStats();
-  const list = document.getElementById("adminList");
-  if (!list.children.length) document.getElementById("adminEmpty").hidden = false;
-}
+});
 
-checkAdminRoute();
+// Optional status filter for the admin list, if present in the HTML
+on($("adminStatusFilter"), "change", (e) => { adminFilterStatus = e.target.value; loadAdminList(); });
+
+// =========================================================
+// CONNECTIVITY
+// =========================================================
+on(window, "offline", () => toast("You're offline.", "error"));
+on(window, "online", () => { toast("Back online.", "success"); if (!grid || !grid.children.length) loadResources({ reset: true }); });
 
 // =========================================================
 // INIT
 // =========================================================
 buildFilterPills();
 populateFormSelects();
-loadResources();
+loadResources({ reset: true });
 loadStats();
+checkAdminRoute();
