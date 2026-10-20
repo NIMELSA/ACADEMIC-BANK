@@ -1,4 +1,4 @@
-# NIMELSA KDU Chapter — Academic Bank
+# NIMELSSA KDU Chapter — Academic Bank
 
 A plain HTML/CSS/JS site (no build step, no framework, no `node_modules`)
 that talks directly to your Supabase project. No accounts, no sign-in —
